@@ -20,7 +20,7 @@ The project automatically blocks high-sensitivity metadata such as GPS, address,
 >
 >*(If EXIF data still cannot be removed, you can use the /auto-fix command from the repository when merging your PR to remove it.)*
 
-### Pay attention to case sensitivity
+### Pay attention to picture size
 
 To prevent excessive resource usage on GitHub, please check the photo size before uploading. If it exceeds `1MB`, you need to compress the image.
 
