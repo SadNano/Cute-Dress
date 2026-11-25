@@ -1,0 +1,37 @@
+# Trusted comment for failed EXIF checks. Never checks out PR code or downloads artifacts.
+name: Comment on EXIF Failure
+
+on:
+  workflow_run:
+    workflows: [Check Image EXIF Data]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+  issues: write
+
+concurrency:
+  group: exif-comment-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_branch || github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  comment:
+    if: >
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout trusted default-branch comment logic
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Verify current PR and comment
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { run } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/check_exif`);
+            await run({ github, context, core, mode: 'comment' });

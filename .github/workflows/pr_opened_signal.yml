@@ -1,0 +1,15 @@
+# Minimal unprivileged signal used by the trusted first-interaction workflow.
+name: PR Opened Signal
+
+on:
+  pull_request:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record PR opened event
+        run: echo "PR opened signal recorded."

@@ -1,16 +1,41 @@
 name: Greetings
 
-on: [pull_request_target]
+on:
+  workflow_run:
+    workflows: [PR Opened Signal]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: first-pr-greeting-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_branch || github.event.workflow_run.id }}
+  cancel-in-progress: false
 
 jobs:
   greeting:
+    if: >
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
+      actions: read
+      contents: read
       issues: write
-      pull-requests: write
+      pull-requests: read
     steps:
-    - uses: actions/first-interaction@v1
-      with:
-        repo-token: ${{ secrets.GITHUB_TOKEN }}
-        #issue-message: "Message that will be displayed on users' first issue"
-        pr-message: "你好 @${{ github.actor }}，感谢提交PR！\nHi @${{ github.actor }}, thanks for opening the Pull Request!\n我们会尽早审核回应😊\nWe will respond to it as soon as possible😊"
+      - name: Checkout trusted default-branch greeting logic
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Greet first-time contributor
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { run } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/greet_first_interaction`);
+            await run({ github, context, core });

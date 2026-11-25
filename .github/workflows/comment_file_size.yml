@@ -1,0 +1,189 @@
+# Comment on failed Check File Size runs.
+# This privileged workflow only uses GitHub API data and never checks out PR code.
+name: Comment on File Size Failure
+
+concurrency:
+  group: file-size-comment-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_branch || github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+on:
+  workflow_run:
+    workflows: [Check File Size]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+  issues: write
+
+jobs:
+  comment:
+    if: >
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout trusted default-branch helper
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Recheck failed image sizes and comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const MAX_SIZE = 1024 * 1024;
+            const COMMENT_MARKER = '<!-- check-file-size -->';
+            const IMAGE_EXT = /\.(jpe?g|jfif|png|webp|tiff?|hei[cf]|avif|gif|bmp)$/i;
+            const ACTIVE_STATUSES = new Set(['added', 'modified', 'renamed', 'copied']);
+            const PR_TYPE_RE = /<!--\s*pr-type:\s*(\S+)\s*-->/;
+
+            const run = context.payload.workflow_run;
+            const { owner, repo } = context.repo;
+            const { resolveWorkflowRunPR } = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/workflow_run_pr`);
+            const headRepo = run.head_repository;
+            const pr = await resolveWorkflowRunPR(
+              github,
+              owner,
+              repo,
+              run,
+              '.github/workflows/check_file_size.yml'
+            );
+
+            if (!pr) {
+              core.info('No unique open pull request matches the upstream run.');
+              return;
+            }
+
+            const typeMatch = (pr.body || '').match(PR_TYPE_RE);
+            const prType = typeMatch ? typeMatch[1] : 'images';
+            if (prType !== 'images') {
+              core.info(`pr-type is "${prType}", skip file size comment.`);
+              return;
+            }
+
+            const files = [];
+            let page = 1;
+            while (true) {
+              const compare = await github.rest.repos.compareCommitsWithBasehead({
+                owner,
+                repo,
+                basehead: `${pr.base.sha}...${pr.head.sha}`,
+                per_page: 100,
+                page,
+              });
+              const pageFiles = compare.data.files || [];
+              files.push(...pageFiles);
+              if (pageFiles.length < 100) break;
+              page++;
+            }
+
+            const images = files.filter(file =>
+              ACTIVE_STATUSES.has(file.status) && IMAGE_EXT.test(file.filename)
+            );
+            const oversized = [];
+            const unreadable = [];
+            for (const file of images) {
+              try {
+                const encodedPath = file.filename
+                  .split('/')
+                  .map(encodeURIComponent)
+                  .join('/');
+                const rawUrl = `https://raw.githubusercontent.com/${encodeURIComponent(headRepo.owner.login)}/${encodeURIComponent(headRepo.name)}/${pr.head.sha}/${encodedPath}`;
+                const response = await fetch(rawUrl, { signal: AbortSignal.timeout(30_000) });
+                if (!response.ok) throw new Error(`Download returned ${response.status}`);
+
+                let size = 0;
+                const reader = response.body.getReader();
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  size += value.byteLength;
+                  if (size > MAX_SIZE) {
+                    await reader.cancel();
+                    break;
+                  }
+                }
+                if (size > MAX_SIZE) {
+                  const safeName = file.filename.replace(/[\r\n]/g, ' ').replace(/`/g, '&#96;').replace(/@/g, '&#64;');
+                  oversized.push(`- \`${safeName}\` (> ${MAX_SIZE} bytes)`);
+                }
+              } catch (error) {
+                unreadable.push(file.filename);
+                core.warning(`Unable to inspect ${file.filename}: ${error.message}`);
+              }
+            }
+
+            if (oversized.length === 0 && unreadable.length === 0) {
+              core.info('No oversized images remain; no comment needed.');
+              return;
+            }
+
+            const latest = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: pr.number,
+            });
+            if (
+              latest.data.state !== 'open' ||
+              latest.data.head.sha !== pr.head.sha ||
+              latest.data.base.sha !== pr.base.sha ||
+              latest.data.body !== pr.body
+            ) {
+              core.info('Pull request changed during inspection; no comment posted.');
+              return;
+            }
+
+            const body = [
+              ...(oversized.length > 0 ? [
+                '我们注意到以下文件的大小超过了 1 MiB, 请在压缩后再次提交 Pull Request:',
+                'We have noted that the following files exceed 1 MiB in size. Please resubmit your pull request after compressing them:',
+                '',
+                ...oversized,
+                '',
+              ] : []),
+              ...(unreadable.length > 0 ? [
+                '以下图片无法读取以完成大小检查，请确认文件可公开访问后重试:',
+                'The following images could not be read to complete the size check. Ensure they are publicly accessible and retry:',
+                ...unreadable.map(file => `- \`${file.replace(/[\r\n]/g, ' ').replace(/`/g, '&#96;').replace(/@/g, '&#64;')}\``),
+                '',
+              ] : []),
+              '---',
+              '',
+              '温馨提示: 您可以直接使用 `/auto-fix` 命令来自动修复这些文件。',
+              'Warm reminder: You can use the `/auto-fix` command to automatically fix these files.',
+              '',
+              '该命令会将图片压缩到 1 MiB 内, 并且去除**所有的 EXIF**信息, 若您不希望文件被改动, 请自行处理后重新提交 PR',
+              'This command will compress images to under 1 MiB and strip all EXIF metadata.',
+              'If you do not want your files modified, please fix them yourself and push again.',
+              '',
+              COMMENT_MARKER,
+            ].join('\n');
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number: pr.number,
+              per_page: 100,
+            });
+            const existing = comments.find(comment =>
+              comment.user && comment.user.login === 'github-actions[bot]' &&
+              comment.body && comment.body.includes(COMMENT_MARKER)
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: pr.number,
+                body,
+              });
+            }

@@ -2,7 +2,7 @@
 #
 # PR 评论 /auto-fix 触发 (仅维护者或 PR 作者).
 # 对变更图片: 去除全部 EXIF, 循环压缩至 <= 1 MiB, 再 push 回 PR 分支.
-# push 后由 check_file_size / check_exif 的 pull_request_target 自然重跑.
+# GITHUB_TOKEN push 不会自动触发新 workflow; 自动修复后需手动 rerun 检查.
 #
 # 重要常量 / 行为:
 #   IMAGE_EXT   与 size/exif 对齐的图片后缀
